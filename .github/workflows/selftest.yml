@@ -1,0 +1,73 @@
+name: selftest
+# Самопроверка монтажа тем же путём, что и n8n: черновой релиз -> gh_job.py -> out.mp4 + result.json.
+on:
+  push:
+    paths:
+      - .github/workflows/selftest.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ffmpeg и шрифты
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
+      - run: pip install --quiet "pillow==11.*"
+      - name: Самопроверка
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          ffmpeg -v error -f lavfi -i testsrc2=s=1920x1080:r=30:d=20 -f lavfi -i sine=f=440:d=20 -c:v libx264 -preset ultrafast -c:a aac -shortest h.mp4
+          ffmpeg -v error -f lavfi -i testsrc2=s=1080x1920:r=30:d=14 -c:v libx264 -preset ultrafast v.mp4
+          mkdir -p frames
+          for CASE in "h.mp4|{\"id\":\"TEST-H\",\"duration\":12,\"hook\":\"Он не ожидал такого вопроса\",\"overlay\":\"logo\"}" "v.mp4|{\"id\":\"TEST-V\",\"duration\":10,\"hook\":\"Оплатил ChatGPT за 3 минуты\",\"overlay\":\"nologo\"}"; do
+            SRC="${CASE%%|*}"; PARAMS="${CASE#*|}"
+            RID=$(python3 - "$SRC" <<'PY'
+          import json, os, sys, urllib.request
+          H = {"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"], "Accept": "application/vnd.github+json"}
+          repo = os.environ["REPO"]
+          req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases", method="POST", headers=H,
+                data=json.dumps({"tag_name": "selftest-" + os.environ["GITHUB_RUN_ID"] + "-" + sys.argv[1], "draft": True}).encode())
+          rid = json.load(urllib.request.urlopen(req))["id"]
+          data = open(sys.argv[1], "rb").read()
+          req = urllib.request.Request(f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name=source.mp4",
+                method="POST", headers={**H, "Content-Type": "application/octet-stream"}, data=data)
+          urllib.request.urlopen(req).read()
+          print(rid)
+          PY
+          )
+            echo "== $SRC, релиз $RID"
+            RELEASE_ID=$RID PARAMS="$PARAMS" python3 render/gh_job.py
+            python3 - "$RID" "$SRC" <<'PY'
+          import json, os, sys, subprocess, urllib.request
+          H = {"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"], "Accept": "application/vnd.github+json"}
+          repo, rid, src = os.environ["REPO"], sys.argv[1], sys.argv[2]
+          assets = json.load(urllib.request.urlopen(urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/releases/{rid}/assets", headers=H)))
+          names = sorted(a["name"] for a in assets)
+          print("файлы в релизе:", names)
+          assert {"out.mp4", "result.json", "source.mp4"} <= set(names), names
+          subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", "3", "-i", "work/out.mp4", "-frames:v", "1",
+                          "-vf", "scale=540:960", f"frames/{src}.png"], check=True)
+          urllib.request.urlopen(urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/releases/{rid}", method="DELETE", headers=H)).read()
+          print("релиз удалён, проверка пройдена")
+          PY
+            rm -rf work
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selftest-frames
+          path: frames/
