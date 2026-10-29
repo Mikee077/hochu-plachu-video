@@ -1,0 +1,49 @@
+name: render
+run-name: "Монтаж, релиз ${{ inputs.release_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "ID чернового релиза с исходником (source*)"
+        required: true
+        type: string
+      params:
+        description: "Параметры монтажа (JSON)"
+        required: false
+        type: string
+        default: "{}"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: render-${{ inputs.release_id }}
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ffmpeg и шрифты
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
+          ffmpeg -version | head -1
+
+      - name: Python-пакеты
+        run: pip install --quiet "pillow==11.*"
+
+      - name: Монтаж
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          PARAMS: ${{ inputs.params }}
+        run: python3 render/gh_job.py
