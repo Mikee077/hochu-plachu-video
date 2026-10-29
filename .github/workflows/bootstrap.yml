@@ -1,0 +1,31 @@
+name: bootstrap
+# Одноразовый сценарий: распаковывает код монтажа из загруженного архива и убирает архив.
+on:
+  push:
+    paths:
+      - .github/workflows/bootstrap.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Распаковать render/ из архива
+        run: |
+          set -e
+          python3 -m zipfile -e video-hochu-plachu.zip /tmp/x
+          SRC=$(python3 -c "import glob;print(glob.glob('/tmp/x/*/github-*/render')[0])")
+          test -f "$SRC/gh_job.py" && test -f "$SRC/assets/overlay-logo.webm"
+          mkdir -p render
+          cp -r "$SRC/." render/
+          cp "$(dirname "$SRC")/README.md" README.md
+          rm -f render/assets/.gitkeep
+          git rm -q video-hochu-plachu.zip
+          git add -A render README.md
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -m "Код монтажа из архива"
+          git push
+          ls -la render render/assets
