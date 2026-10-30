@@ -106,15 +106,19 @@ def _rolling_median(a, win):
     return np.array([np.median(ap[i:i + win]) for i in range(len(a))])
 
 
-def find_moments(src, work, k=5, min_dur=7.0, max_dur=20.0, target=15.0, model=None):
-    """Возвращает список лучших непересекающихся моментов [{start, duration, score, text, ...}]."""
+def find_moments(src, work, k=5, min_dur=7.0, max_dur=20.0, target=15.0, model=None, layout="clip"):
+    """Возвращает список лучших непересекающихся моментов [{start, duration, score, text, ...}].
+
+    layout="clip" — короткий момент (подводка → пик → реакция);
+    layout="episode" — серия 60–120 с: нарастание к пику ближе к концу и обрыв сразу после него (клиффхэнгер).
+    """
     work = Path(work)
     wav = work / "full.wav"
     extract_audio(src, wav)
     rms = rms_bins(wav)
     nb = len(rms)
     total = nb * BIN
-    model = model or ("base" if total <= 40 * 60 else "tiny")
+    model = model or ("small" if total <= 25 * 60 else "base" if total <= 50 * 60 else "tiny")
     segs = transcribe(wav, model=model)
     scene = scene_bins(src, nb)
 
@@ -147,11 +151,18 @@ def find_moments(src, work, k=5, min_dur=7.0, max_dur=20.0, target=15.0, model=N
         if used[i] or peak[i] <= 0.3:
             continue
         t = i * BIN
-        # Начало — начало фразы за 2–6 с до пика (подводка), конец — фраза после пика + реакция
-        st = max([x for x in seg_starts if t - 8 <= x <= t - 1.5] or [max(0.0, t - 4)])
-        st = min(st, t - 1.0) if t > 1 else 0.0
-        en_opts = [x for x in seg_ends if t + 1.5 <= x <= st + max_dur]
-        en = (en_opts[0] + 1.0) if en_opts else min(total, st + target)
+        if layout == "episode":
+            # Серия: пик на ~70% длины, начало — с начала фразы, конец — фраза после пика + 0,8 с (обрыв)
+            st0 = max(0.0, t - 0.7 * target)
+            st = next((x for x in seg_starts if st0 - 3 <= x <= st0 + 6), st0)
+            en_opts = [x for x in seg_ends if t + 2 <= x <= t + 12]
+            en = (en_opts[0] + 0.8) if en_opts else min(total, t + 5)
+        else:
+            # Начало — начало фразы за 2–6 с до пика (подводка), конец — фраза после пика + реакция
+            st = max([x for x in seg_starts if t - 8 <= x <= t - 1.5] or [max(0.0, t - 4)])
+            st = min(st, t - 1.0) if t > 1 else 0.0
+            en_opts = [x for x in seg_ends if t + 1.5 <= x <= st + max_dur]
+            en = (en_opts[0] + 1.0) if en_opts else min(total, st + target)
         dur = max(min_dur, min(max_dur, en - st))
         if st + dur > total:
             st = max(0.0, total - dur)
@@ -159,6 +170,24 @@ def find_moments(src, work, k=5, min_dur=7.0, max_dur=20.0, target=15.0, model=N
         if b - a < 4 or silent[a:b].mean() > 0.5:
             continue
         hook2 = int(2 / BIN)
+        if layout == "episode":
+            if used[a:b].any():  # серия пересекается с уже выбранной
+                continue
+            # Веса из промпта мини-серий: напряжение 30, понятность 20, хук 15, клиффхэнгер 15, темп 10, место для карточки 10
+            third = max(1, (b - a) // 3)
+            build = excite[b - third:b].mean() - excite[a:a + third].mean()  # нарастание к концу
+            tail = int(5 / BIN)
+            score = (30 * np.clip((peak[a:b].max() / 4 + max(0.0, build) / 2) / 1.5, 0, 1)
+                     + 20 * np.clip(speech[a:b].mean(), 0, 1)
+                     + 15 * np.clip((excite[a:a + int(3 / BIN)].mean() + react[a:a + int(3 / BIN)].max() + 1) / 3, 0, 1)
+                     + 15 * np.clip((excite[max(a, b - tail):b].mean() + react[max(a, b - tail):b].max() + 1) / 3, 0, 1)
+                     + 10 * np.clip((scene_z[a:b].mean() + 1) / 3, 0, 1)
+                     + 10 * np.clip(1 - silent[a:b].mean() * 2, 0, 1))
+            text = " ".join(s["text"] for s in segs if s["end"] > st and s["start"] < st + dur)
+            cands.append({"start": round(float(st), 2), "duration": round(float(dur), 2), "peak": round(t, 2),
+                          "score": int(round(float(score))), "text": text[:900]})
+            used[max(0, a):min(nb, b)] = True  # серии не пересекаются
+            continue
         score = (35 * np.clip(peak[a:b].max() / 4, 0, 1)
                  + 25 * np.clip((laugh[a:b].max() + react[a:b].mean() * 2) / 2, 0, 1)
                  + 15 * np.clip((excite[a:a + hook2].mean() + react[a:a + hook2].max() + 1) / 3, 0, 1)
