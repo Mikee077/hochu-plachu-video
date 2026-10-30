@@ -18,7 +18,7 @@ def HTTPException(code, detail):  # совместимость с кодом с�
 
 ASSETS = Path(os.environ.get("ASSETS_DIR", Path(__file__).parent / "assets"))
 FONT = os.environ.get("FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-MIN_DUR, MAX_DUR = float(os.environ.get("MIN_DUR", "5")), 60.0
+MIN_DUR, MAX_DUR = float(os.environ.get("MIN_DUR", "5")), 180.0
 DEFAULT_DUR = float(os.environ.get("DEFAULT_DUR", "30"))
 
 
@@ -252,7 +252,8 @@ def bar_filters(kind, title, items, out_dur, first_input, base_label):
 
 DEFAULTS = dict(start=-1, duration=0, hook="", marking="", banner_from=0, overlay="logo", overlay_pos="tr",
                 overlay_scale=0.68, overlay_mode="loop", overlay_show=0, bar="auto", vertical_boost=1.10,
-                bar_title="", bar_items="", crop="none", crop_x=0.5, subs=False, subs_model="small")
+                bar_title="", bar_items="", crop="none", crop_x=0.5, subs=False, subs_model="small",
+                hook_show=0, end_text="")
 
 
 def render_video(src, out, **params):
@@ -266,6 +267,7 @@ def render_video(src, out, **params):
     bar_title, bar_items = str(p["bar_title"]), str(p["bar_items"])
     crop, crop_x = str(p["crop"]).lower(), max(0.0, min(1.0, float(p["crop_x"])))
     subs = str(p["subs"]).lower() in ("1", "true", "yes", "да")
+    hook_show, end_text = float(p["hook_show"]), str(p["end_text"]).strip()
     src, out = Path(src), Path(out)
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -329,7 +331,15 @@ def render_video(src, out, **params):
                      "borderw=4:bordercolor=black@0.8:line_spacing=8:x=(w-text_w)/2:"
                      + (f"y={video_top + 30}[v2]" if bar_top and not vertical and video_top > 200
                         else f"y={bar_top - 40}-text_h[v2]" if bar_top else "y=h*0.72[v2]"))
+            if hook_show > 0:  # хук только в первые секунды (например, «Серия 2/5»)
+                f[-1] = f[-1][:-4] + f":enable='lt(t,{hook_show:.2f})'[v2]"
             last = "v2"
+        if end_text:  # плашка в конце: «Продолжение — в профиле»
+            (tmp / "end.txt").write_text(wrap_text(end_text, 54, 960), encoding="utf-8")
+            f.append(f"[{last}]drawtext=fontfile={FONT}:textfile={tmp/'end.txt'}:fontsize=54:fontcolor=white:text_align=C:"
+                     "box=1:boxcolor=black@0.55:boxborderw=24:x=(w-text_w)/2:y=h*0.42:"
+                     f"enable='gte(t,{max(0.0, out_dur - 3.5):.2f})'[ve]")
+            last = "ve"
         subs_lines = 0
         if subs and has_audio and not loop:
             import highlights  # noqa: PLC0415 — нужен только для субтитров
