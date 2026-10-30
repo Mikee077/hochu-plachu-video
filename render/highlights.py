@@ -213,7 +213,15 @@ def make_ass(words_segs, path, y, font="DejaVu Sans", size=72, max_words=3):
     """ASS-файл: крупные белые слова с чёрной обводкой, по 2–3 слова, текущее слово жёлтое."""
     chunks = []
     for s in words_segs:
-        ws = s.get("words") or []
+        ws = []
+        for w in s.get("words") or []:
+            # «-то», «-нибудь» и отдельные знаки препинания приклеиваем к предыдущему слову
+            if ws and (w["w"].startswith("-") or not re.search(r"\w", w["w"])):
+                ws[-1] = {**ws[-1], "w": ws[-1]["w"] + w["w"], "end": w["end"]}
+            else:
+                ws.append(dict(w))
+        for w in ws:
+            w["w"] = re.sub(r"([.,!?…])(?=\w)", r"\1 ", w["w"])
         for i in range(0, len(ws), max_words):
             part = ws[i:i + max_words]
             if part:
@@ -226,8 +234,9 @@ def make_ass(words_segs, path, y, font="DejaVu Sans", size=72, max_words=3):
         for wi, w in enumerate(part):
             st = w["start"]
             en = part[wi + 1]["start"] if wi + 1 < len(part) else end_chunk
-            txt = " ".join(("{\\c&H00E5FF&}" + x["w"] + "{\\c&HFFFFFF&}") if j == wi else x["w"]
-                           for j, x in enumerate(part)).upper()
+            # верхний регистр — только у слов: теги ASS (\\c) должны остаться строчными
+            txt = " ".join(("{\\c&H00E5FF&}" + x["w"].upper() + "{\\c&HFFFFFF&}") if j == wi else x["w"].upper()
+                           for j, x in enumerate(part))
             # \pos отключает «раздвигание» одновременных строк libass — текст всегда на своём месте
             lines.append(f"Dialogue: 0,{_ass_time(st)},{_ass_time(max(en, st + 0.05))},S,,0,0,0,,"
                          f"{{\\an8\\pos(540,{int(y)})}}{txt}")
