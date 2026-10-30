@@ -252,7 +252,7 @@ def bar_filters(kind, title, items, out_dur, first_input, base_label):
 
 DEFAULTS = dict(start=-1, duration=0, hook="", marking="", banner_from=0, overlay="logo", overlay_pos="tr",
                 overlay_scale=0.68, overlay_mode="loop", overlay_show=0, bar="auto", vertical_boost=1.10,
-                bar_title="", bar_items="")
+                bar_title="", bar_items="", crop="none", crop_x=0.5, subs=False, subs_model="small")
 
 
 def render_video(src, out, **params):
@@ -264,15 +264,21 @@ def render_video(src, out, **params):
     overlay_scale, overlay_mode, overlay_show = float(p["overlay_scale"]), str(p["overlay_mode"]).lower(), float(p["overlay_show"])
     bar, vertical_boost = str(p["bar"]).lower(), float(p["vertical_boost"])
     bar_title, bar_items = str(p["bar_title"]), str(p["bar_items"])
+    crop, crop_x = str(p["crop"]).lower(), max(0.0, min(1.0, float(p["crop_x"])))
+    subs = str(p["subs"]).lower() in ("1", "true", "yes", "да")
     src, out = Path(src), Path(out)
     tmp = Path(tempfile.mkdtemp())
     try:
         src_dur, has_audio, src_w, src_h = probe(src)
         vertical = src_h >= src_w * 1.2  # 9:16, 3:4 и т. п.
+        cropped = crop == "center" and not vertical  # горизонтальный исходник режем до 9:16 на весь экран
+        if cropped:
+            vertical = True
         orientation = "vertical" if vertical else "horizontal"
         # Видимая область исходника в кадре 1080x1920 (вписан по ширине или высоте)
         fit = min(1080 / max(1, src_w), 1920 / max(1, src_h))
-        video_top = int((1920 - src_h * fit) / 2)
+        video_top = 0 if cropped else int((1920 - src_h * fit) / 2)
+        video_h = 1920 if cropped else int(src_h * fit)
         if bar == "auto":  # горизонтальным — полоса A под видео, вертикальным — без полосы
             bar = "none" if vertical else "static"
         if vertical:
@@ -288,7 +294,7 @@ def render_video(src, out, **params):
         out_dur = MIN_DUR if loop else dur
 
         # Фон: размытая копия на весь кадр; поверх — исходник целиком по ширине.
-        f = [
+        f = [f"[0:v]crop='min(iw,ih*9/16)':ih:'(iw-min(iw,ih*9/16))*{crop_x}':0,scale=1080:1920,setsar=1,fps=30[base]"] if cropped else [
             "[0:v]split=2[a][b]",
             "[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2,eq=brightness=-0.08[bg]",
             "[b]scale=1080:1920:force_original_aspect_ratio=decrease[fg]",
@@ -324,6 +330,18 @@ def render_video(src, out, **params):
                      + (f"y={video_top + 30}[v2]" if bar_top and not vertical and video_top > 200
                         else f"y={bar_top - 40}-text_h[v2]" if bar_top else "y=h*0.72[v2]"))
             last = "v2"
+        subs_lines = 0
+        if subs and has_audio and not loop:
+            import highlights  # noqa: PLC0415 — нужен только для субтитров
+            if vertical:
+                sy = 1920 * (0.56 if hook.strip() else 0.64)
+            else:  # внутри кадра исходника, над полосой с условиями
+                sy = min(video_top + video_h - 150, (bar_top or 9999) - 190)
+            subs_lines = highlights.clip_subtitles(src, start, out_dur, tmp, tmp / "subs.ass", sy,
+                                                   model=str(p["subs_model"]))
+            if subs_lines:
+                f.append(f"[{last}]ass={tmp / 'subs.ass'}[vs]")
+                last = "vs"
         if marking.strip():
             (tmp / "mark.txt").write_text(marking.strip()[:160], encoding="utf-8")
             f.append(f"[{last}]drawtext=fontfile={FONT}:textfile={tmp/'mark.txt'}:fontsize=26:fontcolor=white@0.9:"
@@ -342,6 +360,6 @@ def render_video(src, out, **params):
             raise HTTPException(500, "ffmpeg: " + r.stderr[-800:])
         return {"duration": round(out_dur, 2), "start": round(start, 2), "width": 1080, "height": 1920,
                 "source_duration": round(src_dur, 2), "looped": loop, "overlay": overlay,
-                "orientation": orientation, "bar": bar, "source_size": f"{src_w}x{src_h}", "size": out.stat().st_size}
+                "orientation": orientation, "bar": bar, "cropped": cropped, "subs_lines": subs_lines, "source_size": f"{src_w}x{src_h}", "size": out.stat().st_size}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
