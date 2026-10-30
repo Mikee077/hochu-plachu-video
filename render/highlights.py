@@ -75,8 +75,14 @@ def whisper(name):
     return _MODEL[name]
 
 
+def _pcm(wav):
+    """Звук как массив float32 16 кГц: так faster-whisper не открывает файл через PyAV (несовместимость версий)."""
+    with wave.open(str(wav)) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def transcribe(wav, model="base", words=False):
-    segs, info = whisper(model).transcribe(str(wav), language="ru", vad_filter=True, beam_size=1,
+    segs, info = whisper(model).transcribe(_pcm(wav), language="ru", vad_filter=True, beam_size=1,
                                            word_timestamps=words, condition_on_previous_text=False)
     out = []
     for s in segs:
