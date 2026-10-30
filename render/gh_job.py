@@ -110,7 +110,8 @@ def analyze(src, params, work):
     import highlights  # noqa: PLC0415
     res = highlights.find_moments(src, work, k=int(params.get("k") or 5),
                                   min_dur=float(params.get("min_dur") or 7), max_dur=float(params.get("max_dur") or 20),
-                                  target=float(params.get("duration") or 15))
+                                  target=float(params.get("duration") or 15),
+                                  layout=str(params.get("layout") or "clip"))
     times = [m["start"] + min(2.0, m["duration"] / 2) for m in res["candidates"]]
     sheet = highlights.contact_sheet(src, work / "preview.jpg", times)
     if sheet:
