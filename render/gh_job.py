@@ -9,7 +9,8 @@ out.mp4 и result.json. Черновые релизы не публикуютс�
 Режимы (PARAMS.mode):
   render  (по умолчанию) — монтаж одного ролика → out.mp4 + result.json;
   analyze — поиск лучших моментов в длинном ролике → result.json (moments, candidates) + preview.jpg.
-Исходник: файл source* в релизе или PARAMS.source_url (ссылка Google Drive «доступ по ссылке»).
+Исходник: файл source* в релизе или PARAMS.source_url — ссылка Google Drive («доступ по ссылке»), прямая ссылка на файл
+или страница площадки (Twitch, YouTube, VK Видео, Kick…) — её качает yt-dlp, только если канал есть в PARAMS.allowed.
 """
 import json, os, sys, time, urllib.parse, urllib.request, urllib.error
 from pathlib import Path
@@ -90,10 +91,70 @@ def download_url(url, dest):
         raise RuntimeError("скачался слишком маленький файл — ссылка не на видео")
 
 
+VIDEO_SITES = ("twitch.tv", "youtube.com", "youtu.be", "vkvideo.ru", "vk.com", "vk.ru", "kick.com", "rutube.ru",
+               "tiktok.com", "instagram.com")
+
+
+def is_video_page(url):
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    return any(host == s or host.endswith("." + s) for s in VIDEO_SITES)
+
+
+def allowed_channel(info, allowed):
+    """Канал ролика есть в белом списке SOURCE_CHANNELS (ссылка на канал, @ник или ник)."""
+    import re
+    ids = " ".join(str(info.get(k) or "") for k in
+                   ("uploader_id", "uploader_url", "channel_id", "channel_url", "channel", "uploader")).lower()
+    for a in allowed:
+        token = str(a).strip().lower().rstrip("/").split("?")[0].split("/")[-1].lstrip("@")
+        if len(token) >= 3 and re.search(r"(^|[/@\s])" + re.escape(token) + r"($|[/\s])", ids):
+            return True
+    return False
+
+
+def ytdlp(url, dest, params, section=None):
+    """Скачивает видео со страницы площадки через yt-dlp — только с каналов из белого списка."""
+    import subprocess
+    ensure_packages("yt-dlp")
+    base = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings"]
+    r = subprocess.run(base + ["-j", url], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("yt-dlp не открыл ссылку: " + (r.stderr.strip().splitlines() or ["?"])[-1][:300])
+    info = json.loads(r.stdout.splitlines()[0])
+    who = info.get("channel") or info.get("uploader") or info.get("uploader_id") or "?"
+    if not allowed_channel(info, params.get("allowed") or []):
+        raise RuntimeError(f"канал «{who}» не в белом списке SOURCE_CHANNELS: скачиваем только свои каналы "
+                           "и каналы авторов, давших согласие")
+    if info.get("is_live"):
+        raise RuntimeError("эфир ещё идёт — дождитесь записи (VOD) и пришлите ссылку на неё")
+    h = int(params.get("max_height") or 1080)
+    cmd = base + ["-f", f"bv*[height<={h}]+ba/b[height<={h}]/b", "--merge-output-format", "mp4",
+                  "--retries", "5", "--concurrent-fragments", "8", "-o", str(dest), "--force-overwrites"]
+    if section:
+        cmd += ["--download-sections", f"*{section[0]:.2f}-{section[1]:.2f}", "--force-keyframes-at-cuts"]
+    r = subprocess.run(cmd + [url], capture_output=True, text=True)
+    if r.returncode != 0 or not Path(dest).exists():
+        raise RuntimeError("yt-dlp не скачал видео: " + (r.stderr.strip().splitlines() or ["?"])[-1][:300])
+    print(f"yt-dlp: {who} — {info.get('title', '')[:80]} ({info.get('duration')} с)")
+    return info
+
+
 def get_source(params, work):
     if params.get("source_url"):
         src = work / "source.mp4"
-        download_url(params["source_url"], src)
+        url = params["source_url"]
+        if is_video_page(url):
+            section = None
+            if params.get("mode") == "analyze":
+                params.setdefault("max_height", 720)  # для поиска моментов хватает 720p, качается быстрее
+            elif float(params.get("start", -1) or -1) >= 0:
+                # для монтажа качаем только нужный кусок (+1 с с краёв), начало сдвигаем
+                st, dur = float(params["start"]), float(params.get("duration") or 30)
+                a = max(0.0, st - 1.0)
+                section, params["start"] = (a, st + dur + 1.0), round(st - a, 2)
+            ytdlp(url, src, params, section)
+        else:
+            download_url(url, src)
         return src
     assets = call("GET", f"{API}/repos/{REPO}/releases/{RID}/assets?per_page=100")
     src_asset = next((a for a in assets if a["name"].startswith("source")), None)
